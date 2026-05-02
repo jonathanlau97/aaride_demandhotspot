@@ -257,13 +257,19 @@ H3_RES = 8   # ~0.86 km² per cell — matches the 2 km broadcast radius well
 
 def _h3_color(pct: float) -> list:
     """
-    Wise-aligned hex cell colours at 15% opacity (alpha=38).
-    Keeps map base fully visible — cells read as tints, not fills.
+    Light pastel tints — Wise sentiment colours blended 30% with white.
+    Alpha fixed at 255 (fully opaque) so WebGL renders correctly in Streamlit.
+    Lightness is baked into the RGB values, not the alpha channel.
+
+    Crisis  #A8200D @ 30% -> [228, 188, 182]  soft rose
+    Watch   #EDC843 @ 30% -> [249, 238, 198]  pale amber
+    OK      #9FE870 @ 30% -> [226, 248, 212]  mint green
+    Good    #EAF4E0 @ 30% -> [248, 251, 245]  near-white sage
     """
-    if pct >= 20:   return [168,  32,  13, 5]   # Sentiment Negative #A8200D — crisis
-    elif pct >= 12: return [237, 200,  67, 5]   # Sentiment Warning  #EDC843 — watch
-    elif pct >= 5:  return [159, 232, 112, 5]   # Bright Green       #9FE870 — OK
-    else:           return [234, 244, 224, 5]   # Positive light bg  #EAF4E0 — well served
+    if pct >= 20:   return [228, 188, 182, 255]   # soft rose   — crisis
+    elif pct >= 12: return [249, 238, 198, 255]   # pale amber  — watch
+    elif pct >= 5:  return [226, 248, 212, 255]   # mint green  — OK
+    else:           return [248, 251, 245, 255]   # sage white  — well served
 
 
 def add_h3_column(df: pd.DataFrame, res: int = H3_RES) -> pd.DataFrame:
@@ -623,17 +629,17 @@ def render_h3(df: pd.DataFrame, cell_filter: str = "All"):
                     margin-top:8px;font-size:12px;color:{W['content_secondary']}">
           <span style="display:flex;align-items:center;gap:5px">
             <span style="width:12px;height:12px;border-radius:2px;
-                   background:#A8200D;display:inline-block"></span>
+                   background:#E4BCB6;border:1px solid #C8786E;display:inline-block"></span>
             Crisis &gt;20% &nbsp;<b style="color:{W['negative']}">{crisis_cells}</b>
           </span>
           <span style="display:flex;align-items:center;gap:5px">
             <span style="width:12px;height:12px;border-radius:2px;
-                   background:#EDC843;border:1px solid #C8A800;display:inline-block"></span>
+                   background:#F9EEC6;border:1px solid #C8A800;display:inline-block"></span>
             Watch 12–20% &nbsp;<b style="color:#8A6E00">{watch_cells}</b>
           </span>
           <span style="display:flex;align-items:center;gap:5px">
             <span style="width:12px;height:12px;border-radius:2px;
-                   background:#9FE870;border:1px solid #5AAA30;display:inline-block"></span>
+                   background:#E2F8D4;border:1px solid #5AAA30;display:inline-block"></span>
             OK &lt;12% &nbsp;<b style="color:{W['positive']}">{ok_cells}</b>
           </span>
           <span style="margin-left:auto;color:{W['content_tertiary']}">
