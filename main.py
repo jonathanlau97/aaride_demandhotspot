@@ -181,15 +181,35 @@ def run_dbscan(coords_json: str) -> pd.DataFrame:
         centroid_lat = pts[:, 0].mean()
         centroid_lng = pts[:, 1].mean()
 
-        # Convex hull boundary — gives clean zone outline for stakeholders
+        # Convex hull — buffered outward by ~300m and smoothed for clean boundary
         hull_coords = []
-        if len(pts) >= 3:
+        if len(pts) >= 4:
             try:
-                hull = ConvexHull(pts)
-                hull_pts = pts[hull.vertices]
-                # Close the polygon
-                hull_coords = [[float(p[0]), float(p[1])] for p in hull_pts]
-                hull_coords.append(hull_coords[0])
+                hull      = ConvexHull(pts)
+                hull_pts  = pts[hull.vertices]
+                centroid  = pts.mean(axis=0)
+
+                # Buffer each vertex outward from centroid by ~300m (0.003 deg)
+                BUFFER = 0.003
+                buffered = []
+                for pt in hull_pts:
+                    direction = pt - centroid
+                    norm = np.linalg.norm(direction)
+                    buffered.append(
+                        pt + direction / norm * BUFFER if norm > 0 else pt
+                    )
+
+                # Smooth by inserting midpoints between consecutive vertices
+                smoothed = []
+                n_buf = len(buffered)
+                for i in range(n_buf):
+                    smoothed.append(buffered[i])
+                    nxt = buffered[(i + 1) % n_buf]
+                    smoothed.append([(buffered[i][0]+nxt[0])/2,
+                                     (buffered[i][1]+nxt[1])/2])
+
+                smoothed.append(smoothed[0])  # close polygon
+                hull_coords = [[float(p[0]), float(p[1])] for p in smoothed]
             except Exception:
                 pass
 
@@ -567,39 +587,74 @@ def handle_upload(f):
 def build_map(df, view):
     m = folium.Map(location=[3.1478,101.6953], zoom_start=13,
                    tiles="CartoDB Positron", prefer_canvas=True)
-    # ── DBSCAN zone overlays — derived from actual order data ──────────────
+    # ── DBSCAN zone boundaries — buffered convex hull per zone ────────────
     zone_df = st.session_state.get("zone_df", pd.DataFrame())
     if not zone_df.empty:
-        # Colour zones by unmet rate
         for _, z in zone_df.iterrows():
             pct = z["unmet_pct"]
-            c   = "#A8200D" if pct>=20 else "#EDC843" if pct>=12 else "#163300"
 
-            # Convex hull boundary polygon
+            # Colour scheme matches H3 grid for consistency
+            if pct >= 20:
+                border_col = "#FF453A"   # red   — crisis
+                fill_col   = "#FF453A"
+                label_bg   = "rgba(255,69,58,0.12)"
+            elif pct >= 12:
+                border_col = "#B8860B"   # amber — watch
+                fill_col   = "#FFC400"
+                label_bg   = "rgba(255,196,0,0.12)"
+            else:
+                border_col = "#163300"   # green — OK
+                fill_col   = "#30D158"
+                label_bg   = "rgba(22,51,0,0.08)"
+
+            # ── Boundary polygon ──────────────────────────────────────────
             if z["hull_coords"] and len(z["hull_coords"]) >= 3:
                 folium.Polygon(
                     locations=z["hull_coords"],
-                    color=c, weight=1.5, fill=True,
-                    fill_color=c, fill_opacity=0.06,
-                    tooltip=(
-                        f"<b>{z['zone_name']}</b><br>"
-                        f"Orders: {z['order_count']:,}<br>"
-                        f"Unmet: {z['unmet_pct']}%"
+                    color=border_col,
+                    weight=2.5,
+                    dash_array="6 3",
+                    fill=True,
+                    fill_color=fill_col,
+                    fill_opacity=0.10,
+                    tooltip=folium.Tooltip(
+                        text=(
+                            f"<div style='font-family:Inter,sans-serif;"
+                            f"font-size:12px;min-width:140px'>"
+                            f"<b style='font-size:13px'>{z['zone_name']}</b><br>"
+                            f"Orders: <b>{z['order_count']:,}</b><br>"
+                            f"Unmet: <b style='color:{border_col}'>"
+                            f"{z['unmet_pct']}%</b><br>"
+                            f"Lost orders: <b>{z['unmet_count']:,}</b>"
+                            f"</div>"
+                        ),
+                        sticky=True,
                     ),
                 ).add_to(m)
 
-            # Zone label at centroid
+            # ── Zone label pill at centroid ───────────────────────────────
+            verdict = "CRISIS" if pct>=20 else "WATCH" if pct>=12 else "OK"
             folium.Marker(
                 [z["centroid_lat"], z["centroid_lng"]],
                 icon=folium.DivIcon(
                     html=(
-                        f'<div style="font-size:10px;font-weight:600;color:{c};'
-                        f'white-space:nowrap;font-family:Inter,sans-serif;'
-                        f'background:rgba(255,255,255,0.90);padding:2px 7px;'
-                        f'border-radius:4px;border:1px solid {c}66">'
-                        f'{z["zone_name"]} · {z["order_count"]:,} orders</div>'
+                        f'<div style="display:inline-flex;align-items:center;gap:5px;'
+                        f'font-family:Inter,sans-serif;white-space:nowrap;'
+                        f'background:rgba(255,255,255,0.95);'
+                        f'border:1.5px solid {border_col};'
+                        f'border-radius:20px;padding:3px 9px;'
+                        f'box-shadow:0 1px 4px rgba(0,0,0,0.15);">'
+                        f'<span style="font-size:9px;font-weight:700;'
+                        f'color:{border_col};letter-spacing:0.04em">'
+                        f'{verdict}</span>'
+                        f'<span style="font-size:10px;font-weight:600;'
+                        f'color:#1A1A2E">{z["zone_name"]}</span>'
+                        f'<span style="font-size:9px;color:#6A6C6A">'
+                        f'{z["order_count"]:,}</span>'
+                        f'</div>'
                     ),
-                    icon_size=(160, 20), icon_anchor=(80, 10),
+                    icon_size=(180, 24),
+                    icon_anchor=(90, 12),
                 ),
             ).add_to(m)
 
