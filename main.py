@@ -509,8 +509,13 @@ def build_h3(cell_series_json: str, res: int) -> pd.DataFrame:
     return agg
 
 
-def render_h3(df: pd.DataFrame, extruded: bool = False):
-    """Render H3 hex grid via pydeck."""
+def render_h3(df: pd.DataFrame, cell_filter: str = "All"):
+    """
+    Render H3 hex grid via pydeck.
+    cell_filter: 'All' | 'Crisis only' | 'Watch only' | 'OK only'
+    Tooltip is attached to each hexagon's centroid via get_position,
+    making hover precise and not just an overlay.
+    """
     if df.empty:
         st.info("No data for this filter.")
         return
@@ -518,60 +523,123 @@ def render_h3(df: pd.DataFrame, extruded: bool = False):
         st.info("H3 cells not computed — re-upload your CSV.")
         return
 
-    # Pass only the two columns needed — tiny payload for cache hash
-    slim = df[["h3_cell", "status"]].to_json(orient="records")
+    slim  = df[["h3_cell", "status"]].to_json(orient="records")
     hexes = build_h3(slim, H3_RES)
     if hexes.empty:
         st.info("Not enough points to form hexagons.")
         return
 
+    # ── Apply cell filter ──
+    if cell_filter == "Crisis only":
+        hexes = hexes[hexes["unmet_pct"] >= 20].copy()
+    elif cell_filter == "Watch only":
+        hexes = hexes[(hexes["unmet_pct"] >= 12) & (hexes["unmet_pct"] < 20)].copy()
+    elif cell_filter == "OK only":
+        hexes = hexes[hexes["unmet_pct"] < 12].copy()
+
+    if hexes.empty:
+        st.info(f"No cells match the '{cell_filter}' filter for this time window.")
+        return
+
+    # ── Compute cell centroids for precise tooltip positioning ──
+    # H3HexagonLayer tooltips fire on the centroid, not a canvas overlay,
+    # so as long as we pass lat/lng the hover is exact to the cell.
+    def _centroid(cell):
+        lat, lng = h3.cell_to_latlng(cell)
+        return [round(lng, 6), round(lat, 6)]   # pydeck expects [lng, lat]
+
+    hexes["position"] = hexes["h3_cell"].apply(_centroid)
+
+    # ── Richer tooltip — shows all key metrics ──
+    hexes["tooltip_html"] = (
+        "<div style='font-family:Inter,sans-serif;min-width:160px'>"
+        "<div style='font-size:11px;font-weight:600;text-transform:uppercase;"
+        "letter-spacing:0.05em;margin-bottom:6px;opacity:0.7'>Cell detail</div>"
+        "<div style='font-size:15px;font-weight:600;margin-bottom:2px'>"
+        + hexes["unmet_pct"].astype(str) + "% unmet</div>"
+        "<div style='font-size:12px;opacity:0.85'>"
+        + hexes["total"].astype(str) + " orders total</div>"
+        "<div style='font-size:12px;opacity:0.85'>"
+        + hexes["unmet"].astype(int).astype(str) + " lost to no-driver</div>"
+        "<div style='font-size:12px;opacity:0.85'>"
+        + hexes["cancelled"].astype(int).astype(str) + " cancelled</div>"
+        "</div>"
+    )
+
     layer = pdk.Layer(
-        "H3HexagonLayer", hexes,
+        "H3HexagonLayer",
+        hexes,
         get_hexagon="h3_cell",
         get_fill_color="fill_color",
-        get_elevation="elevation",
-        elevation_scale=1,
-        extruded=extruded,
+        extruded=False,
         pickable=True,
         auto_highlight=True,
-        highlight_color=[255, 255, 255, 60],
-        coverage=0.88,  # slight gap between cells aids readability on white
+        highlight_color=[255, 255, 255, 80],
+        coverage=0.88,
     )
+
     view = pdk.ViewState(
         latitude=3.1478, longitude=101.6953,
-        zoom=13, pitch=45 if extruded else 0, bearing=0,
+        zoom=13, pitch=0, bearing=0,
     )
+
+    tooltip = {
+        "html": "{tooltip_html}",
+        "style": {
+            "backgroundColor": "#163300",
+            "color":           "#9FE870",
+            "fontSize":        "13px",
+            "padding":         "10px 14px",
+            "borderRadius":    "8px",
+            "boxShadow":       "0 4px 16px rgba(0,0,0,0.18)",
+            "border":          "1px solid #2A5800",
+            "pointer-events":  "none",
+        },
+    }
+
     st.pydeck_chart(
         pdk.Deck(
             layers=[layer],
             initial_view_state=view,
             map_style="light",
-            tooltip={
-                "html": "<b>{tooltip}</b>",
-                "style": {"backgroundColor":"#163300","color":"#9FE870",
-                          "fontSize":"12px","padding":"6px 10px","borderRadius":"6px"},
-            },
+            tooltip=tooltip,
         ),
-        use_container_width=True, height=460,
+        use_container_width=True,
+        height=460,
     )
 
-    crisis = (hexes["unmet_pct"] >= 20).sum()
-    watch  = ((hexes["unmet_pct"] >= 12) & (hexes["unmet_pct"] < 20)).sum()
-    ok     = (hexes["unmet_pct"] < 12).sum()
+    # ── Cell summary stats ──
+    total_cells  = len(hexes)
+    crisis_cells = (hexes["unmet_pct"] >= 20).sum()
+    watch_cells  = ((hexes["unmet_pct"] >= 12) & (hexes["unmet_pct"] < 20)).sum()
+    ok_cells     = (hexes["unmet_pct"] <  12).sum()
+
+    filter_note = (
+        f" (filtered: {cell_filter})"
+        if cell_filter != "All" else ""
+    )
+
     st.markdown(
-        f'''<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;
+        f'''<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;
                     margin-top:8px;font-size:12px;color:{W['content_secondary']}">
-          <span><span style="width:12px;height:12px;border-radius:2px;
-                 background:#D0021B;display:inline-block;margin-right:5px"></span>
-          Crisis &gt;20% &nbsp;<b style="color:{W['negative']}">{crisis}</b> cells</span>
-          <span><span style="width:12px;height:12px;border-radius:2px;
-                 background:#EDC843;display:inline-block;margin-right:5px;border:1px solid #C8A800"></span>
-          Watch 12–20% &nbsp;<b style="color:#8A6E00">{watch}</b> cells</span>
-          <span><span style="width:12px;height:12px;border-radius:2px;
-                 background:#9FE870;display:inline-block;margin-right:5px;border:1px solid #5AAA30"></span>
-          OK &lt;12% &nbsp;<b style="color:{W['positive']}">{ok}</b> cells</span>
+          <span style="display:flex;align-items:center;gap:5px">
+            <span style="width:12px;height:12px;border-radius:2px;
+                   background:#A8200D;display:inline-block"></span>
+            Crisis &gt;20% &nbsp;<b style="color:{W['negative']}">{crisis_cells}</b>
+          </span>
+          <span style="display:flex;align-items:center;gap:5px">
+            <span style="width:12px;height:12px;border-radius:2px;
+                   background:#EDC843;border:1px solid #C8A800;display:inline-block"></span>
+            Watch 12–20% &nbsp;<b style="color:#8A6E00">{watch_cells}</b>
+          </span>
+          <span style="display:flex;align-items:center;gap:5px">
+            <span style="width:12px;height:12px;border-radius:2px;
+                   background:#9FE870;border:1px solid #5AAA30;display:inline-block"></span>
+            OK &lt;12% &nbsp;<b style="color:{W['positive']}">{ok_cells}</b>
+          </span>
           <span style="margin-left:auto;color:{W['content_tertiary']}">
-            H3 res {H3_RES} · ~0.86 km²/cell · {len(hexes)} cells</span>
+            H3 res {H3_RES} · ~0.86 km²/cell · {total_cells} cells{filter_note}
+          </span>
         </div>''',
         unsafe_allow_html=True,
     )
@@ -986,17 +1054,35 @@ def dashboard(df_raw, sh, sd, sv):
 
     # Map view toggle + zone panel
     # ── View toggle ──
-    view_toggle = st.radio(
-        "Map view",
-        ["Heatmap", "H3 grid", "H3 grid (3-D)"],
-        horizontal=True,
-        label_visibility="collapsed",
-    )
-    st.markdown(
-        f'<div style="display:flex;gap:16px;font-size:12px;color:{W["content_tertiary"]};'
-        f'margin:-6px 0 10px 0">'        f'<span><b style="color:{W["content_primary"]}">Heatmap</b> — density blur, good for pattern spotting</span>'        f'<span><b style="color:{W["content_primary"]}">H3 grid</b> — discrete cells, good for ops targeting</span>'        f'<span><b style="color:{W["content_primary"]}">H3 3-D</b> — elevation = volume</span></div>',
-        unsafe_allow_html=True,
-    )
+    col_tog, col_filt = st.columns([2, 2], gap="large")
+    with col_tog:
+        view_toggle = st.radio(
+            "Map view",
+            ["Heatmap", "H3 grid"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            f'<div style="font-size:12px;color:{W["content_tertiary"]};margin:-4px 0 10px 0">'
+            f'<b style="color:{W["content_primary"]}">Heatmap</b> — density pattern &nbsp;·&nbsp; '
+            f'<b style="color:{W["content_primary"]}">H3 grid</b> — discrete cells for ops targeting</div>',
+            unsafe_allow_html=True,
+        )
+    with col_filt:
+        h3_filter = st.radio(
+            "Show cells",
+            ["All", "Crisis only", "Watch only", "OK only"],
+            horizontal=True,
+            label_visibility="collapsed",
+        ) if view_toggle == "H3 grid" else "All"
+        if view_toggle == "H3 grid":
+            st.markdown(
+                f'<div style="font-size:12px;color:{W["content_tertiary"]};margin:-4px 0 10px 0">'
+                f'<b style="color:{W["negative"]}">Crisis</b> &gt;20% unmet &nbsp;·&nbsp; '
+                f'<b style="color:#8A6E00">Watch</b> 12–20% &nbsp;·&nbsp; '
+                f'<b style="color:{W["positive"]}">OK</b> &lt;12%</div>',
+                unsafe_allow_html=True,
+            )
 
     mc, pc = st.columns([3,1], gap="medium")
     with mc:
@@ -1004,10 +1090,8 @@ def dashboard(df_raw, sh, sd, sv):
         st.markdown(f'<div class="sec">{sec_title}</div>', unsafe_allow_html=True)
         if view_toggle == "Heatmap":
             st_folium(build_map(df, sv), width=None, height=460, returned_objects=[])
-        elif view_toggle == "H3 grid":
-            render_h3(df, extruded=False)
         else:
-            render_h3(df, extruded=True)
+            render_h3(df, cell_filter=h3_filter)
 
     with pc:
         st.markdown('<div class="sec">Zone ranking</div>', unsafe_allow_html=True)
