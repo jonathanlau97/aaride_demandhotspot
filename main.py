@@ -463,6 +463,38 @@ def build_map(df, view):
 
 
 # ── H3 hex grid ───────────────────────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False)
+def build_h3(cell_series_json: str, res: int) -> pd.DataFrame:
+    """
+    Aggregate pre-computed H3 cells into per-cell metrics.
+    Receives minimal JSON (h3_cell + status only) — fast to hash and parse.
+    """
+    try:
+        df = pd.read_json(io.StringIO(cell_series_json), orient="records")
+    except Exception:
+        return pd.DataFrame()
+    if df.empty or "h3_cell" not in df.columns:
+        return pd.DataFrame()
+
+    agg = df.groupby("h3_cell").agg(
+        total     =("status", "count"),
+        unmet     =("status", lambda x: (x == "no_driver").sum()),
+        cancelled =("status", lambda x: (x == "cancelled").sum()),
+    ).reset_index()
+
+    agg["unmet_pct"] = (agg["unmet"] / agg["total"] * 100).round(1)
+    max_t = agg["total"].max() or 1
+    agg["elevation"] = (agg["total"] / max_t * 300).round(0).astype(int)
+    agg["fill_color"] = [_h3_color(p) for p in agg["unmet_pct"]]
+    agg["tooltip"] = (
+        agg["total"].astype(str) + " orders · "
+        + agg["unmet_pct"].astype(str) + "% unmet · "
+        + agg["unmet"].astype(int).astype(str) + " lost"
+    )
+    return agg
+
+
 def render_h3(df: pd.DataFrame, extruded: bool = False):
     """Render H3 hex grid via pydeck."""
     if df.empty:
