@@ -127,16 +127,116 @@ iframe{{border-radius:12px!important;border:1px solid {W['border_light']}!import
 """, unsafe_allow_html=True)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-ZONES = [
-    {"id":"klcc",      "name":"KLCC / Bukit Bintang","short":"KLCC",      "lat":3.1579,"lng":101.7123,"r":0.018,"score":9,"tier":1},
-    {"id":"klsentral", "name":"KL Sentral",           "short":"KL Sentral","lat":3.1340,"lng":101.6862,"r":0.014,"score":8,"tier":1},
-    {"id":"bangsar",   "name":"Bangsar / Mid Valley", "short":"Bangsar",   "lat":3.1180,"lng":101.6780,"r":0.015,"score":7,"tier":2},
-    {"id":"damansara", "name":"Damansara",             "short":"Damansara","lat":3.1530,"lng":101.6300,"r":0.016,"score":7,"tier":2},
-    {"id":"chowkit",   "name":"Chow Kit / Titiwangsa","short":"Chow Kit",  "lat":3.1720,"lng":101.6990,"r":0.013,"score":6,"tier":2},
-    {"id":"sunway",    "name":"Sunway / Subang",       "short":"Sunway",   "lat":3.0740,"lng":101.6050,"r":0.015,"score":6,"tier":3},
-    {"id":"montkiara", "name":"Mont Kiara / Kepong",  "short":"Mont Kiara","lat":3.1730,"lng":101.6530,"r":0.013,"score":5,"tier":3},
-    {"id":"cheras",    "name":"Cheras / Ampang",       "short":"Cheras",   "lat":3.1080,"lng":101.7450,"r":0.014,"score":5,"tier":3},
-]
+# ZONES removed — zones are now derived from your actual order data via DBSCAN
+# See run_dbscan() which is called once at upload time
+DBSCAN_EPS_KM  = 0.5    # neighbourhood radius — tuned to KL density & 2km broadcast radius
+DBSCAN_MIN_PTS = 30     # minimum orders to form a zone — filters out sparse outliers
+
+# ── DBSCAN zone discovery ──────────────────────────────────────────────────────
+from sklearn.cluster import DBSCAN
+from scipy.spatial import ConvexHull
+
+@st.cache_data(show_spinner=False)
+def run_dbscan(coords_json: str) -> pd.DataFrame:
+    """
+    Discover demand zones from actual order coordinates using DBSCAN.
+    No hardcoded zone names — zones emerge from where your orders actually land.
+
+    Returns a DataFrame with one row per discovered zone:
+      zone_id, zone_name, centroid_lat, centroid_lng, order_count,
+      unmet_count, unmet_pct, hull_coords (list of [lat,lng] for boundary polygon)
+
+    Zones are ranked by order_count so Zone 1 is always your busiest zone.
+    Noise points (sparse outliers) are excluded — not forced into nearest zone.
+    """
+    try:
+        df = pd.read_json(io.StringIO(coords_json), orient="records")
+    except Exception:
+        return pd.DataFrame()
+    if df.empty or len(df) < DBSCAN_MIN_PTS * 2:
+        return pd.DataFrame()
+
+    coords = df[["order_lat","order_lng"]].values
+    eps_rad = DBSCAN_EPS_KM / 6371.0
+
+    labels = DBSCAN(
+        eps=eps_rad,
+        min_samples=DBSCAN_MIN_PTS,
+        algorithm="ball_tree",
+        metric="haversine",
+    ).fit_predict(np.radians(coords))
+
+    df["zone_cluster"] = labels
+
+    zones = []
+    cluster_ids = sorted([l for l in set(labels) if l >= 0])
+
+    for cid in cluster_ids:
+        mask    = labels == cid
+        pts     = coords[mask]
+        total   = mask.sum()
+        unmet   = (df.loc[mask, "status"] == "no_driver").sum() if "status" in df.columns else 0
+        unmet_p = round(unmet / total * 100, 1) if total else 0
+
+        centroid_lat = pts[:, 0].mean()
+        centroid_lng = pts[:, 1].mean()
+
+        # Convex hull boundary — gives clean zone outline for stakeholders
+        hull_coords = []
+        if len(pts) >= 3:
+            try:
+                hull = ConvexHull(pts)
+                hull_pts = pts[hull.vertices]
+                # Close the polygon
+                hull_coords = [[float(p[0]), float(p[1])] for p in hull_pts]
+                hull_coords.append(hull_coords[0])
+            except Exception:
+                pass
+
+        zones.append({
+            "zone_id":      cid,
+            "zone_name":    f"Zone {cid + 1}",   # renamed by rank below
+            "centroid_lat": round(centroid_lat, 6),
+            "centroid_lng": round(centroid_lng, 6),
+            "order_count":  int(total),
+            "unmet_count":  int(unmet),
+            "unmet_pct":    unmet_p,
+            "hull_coords":  hull_coords,
+        })
+
+    if not zones:
+        return pd.DataFrame()
+
+    # Rank by order volume — Zone 1 = busiest
+    zone_df = pd.DataFrame(zones).sort_values("order_count", ascending=False).reset_index(drop=True)
+    zone_df["zone_name"] = [f"Zone {i+1}" for i in range(len(zone_df))]
+    zone_df["rank"]      = range(1, len(zone_df) + 1)
+
+    return zone_df
+
+
+def assign_zones_from_dbscan(df: pd.DataFrame, zone_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assign each order to its DBSCAN zone using nearest centroid.
+    Noise points (cluster=-1) get zone_name='Outlier'.
+    Called once at upload after run_dbscan().
+    """
+    if zone_df.empty:
+        df["zone_name"] = "Unknown"
+        return df
+
+    centroids = zone_df[["centroid_lat","centroid_lng","zone_name"]].values
+
+    def _nearest(lat, lng):
+        dists = [abs(float(c[0])-lat) + abs(float(c[1])-lng) for c in centroids]
+        return centroids[int(np.argmin(dists))][2]
+
+    df = df.copy()
+    df["zone_name"] = [_nearest(r.order_lat, r.order_lng)
+                       for r in df.itertuples()]
+    return df
+
+
 
 HOUR_PROFILES = [
     0.08,0.04,0.03,0.03,0.05,0.12,
@@ -214,13 +314,14 @@ CREATED_ORDER_STATUS     = "created"       # pending live orders → dropped
 for k, v in {
     "df": None, "file_name": None, "row_count": 0,
     "warnings": [], "upload_error": None,
+    "zone_df": pd.DataFrame(),
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-def nearest_zone(lat, lng):
-    return min(ZONES, key=lambda z: abs(z["lat"]-lat)+abs(z["lng"]-lng))
+# nearest_zone() removed — zone assignment now driven by run_dbscan()
+# See assign_zones_from_dbscan() and the parse_csv() zone assignment block
 
 def lh(h):
     return HL.get(int(h), str(h))
@@ -401,14 +502,25 @@ def parse_csv(file):
                 "Consider using No_Taker for incentive targeting — these zones have drivers but no uptake."
             )
 
-    # Zone assignment
-    def _z(row):
-        z = nearest_zone(row["order_lat"], row["order_lng"])
-        return z["id"], z["name"], z["tier"]
+    # ── Zone discovery via DBSCAN ────────────────────────────────────────────
+    # No hardcoded zones — clusters emerge from where your orders actually land
+    slim_coords = df[["order_lat","order_lng","status"]].to_json(orient="records")
+    zone_df     = run_dbscan(slim_coords)
 
-    zd = df.apply(_z, axis=1, result_type="expand")
-    zd.columns = ["zone","zone_name","zone_tier"]
-    df = pd.concat([df, zd], axis=1)
+    if not zone_df.empty:
+        df = assign_zones_from_dbscan(df, zone_df)
+        warns.append(
+            f"DBSCAN discovered {len(zone_df)} demand zones "
+            f"(eps={DBSCAN_EPS_KM}km, min={DBSCAN_MIN_PTS} orders). "
+            f"Zone 1 = busiest, Zone {len(zone_df)} = smallest."
+        )
+    else:
+        df["zone_name"] = "Unclustered"
+        warns.append(
+            "DBSCAN could not find distinct zones — data may be too sparse. "
+            f"Try reducing DBSCAN_MIN_PTS below {DBSCAN_MIN_PTS}."
+        )
+    st.session_state["zone_df"] = zone_df
 
     if "order_id" not in df.columns:
         df["order_id"] = [f"ORD{i:06d}" for i in range(len(df))]
@@ -438,23 +550,41 @@ def handle_upload(f):
 def build_map(df, view):
     m = folium.Map(location=[3.1478,101.6953], zoom_start=13,
                    tiles="CartoDB Positron", prefer_canvas=True)
-    tc = {1:"#163300", 2:"#F5A623", 3:"#9E9EBF"}
-    for z in ZONES:
-        c = tc[z["tier"]]
-        folium.Circle(
-            [z["lat"],z["lng"]], radius=z["r"]*111000,
-            color=c, weight=1.8, fill=True, fill_color=c, fill_opacity=0.05,
-            tooltip=f"<b>{z['name']}</b> · Score {z['score']}/10 · Tier {z['tier']}",
-        ).add_to(m)
-        folium.Marker(
-            [z["lat"],z["lng"]],
-            icon=folium.DivIcon(
-                html=f'<div style="font-size:10px;font-weight:600;color:{c};white-space:nowrap;'
-                     f'font-family:Inter,sans-serif;background:rgba(255,255,255,0.88);'
-                     f'padding:2px 6px;border-radius:4px;border:1px solid {c}55">{z["short"]}</div>',
-                icon_size=(100,20), icon_anchor=(50,10),
-            ),
-        ).add_to(m)
+    # ── DBSCAN zone overlays — derived from actual order data ──────────────
+    zone_df = st.session_state.get("zone_df", pd.DataFrame())
+    if not zone_df.empty:
+        # Colour zones by unmet rate
+        for _, z in zone_df.iterrows():
+            pct = z["unmet_pct"]
+            c   = "#A8200D" if pct>=20 else "#EDC843" if pct>=12 else "#163300"
+
+            # Convex hull boundary polygon
+            if z["hull_coords"] and len(z["hull_coords"]) >= 3:
+                folium.Polygon(
+                    locations=z["hull_coords"],
+                    color=c, weight=1.5, fill=True,
+                    fill_color=c, fill_opacity=0.06,
+                    tooltip=(
+                        f"<b>{z['zone_name']}</b><br>"
+                        f"Orders: {z['order_count']:,}<br>"
+                        f"Unmet: {z['unmet_pct']}%"
+                    ),
+                ).add_to(m)
+
+            # Zone label at centroid
+            folium.Marker(
+                [z["centroid_lat"], z["centroid_lng"]],
+                icon=folium.DivIcon(
+                    html=(
+                        f'<div style="font-size:10px;font-weight:600;color:{c};'
+                        f'white-space:nowrap;font-family:Inter,sans-serif;'
+                        f'background:rgba(255,255,255,0.90);padding:2px 7px;'
+                        f'border-radius:4px;border:1px solid {c}66">'
+                        f'{z["zone_name"]} · {z["order_count"]:,} orders</div>'
+                    ),
+                    icon_size=(160, 20), icon_anchor=(80, 10),
+                ),
+            ).add_to(m)
 
     if df.empty: return m
 
@@ -841,31 +971,62 @@ def chart_unmet(df_all):
 
 # ── Zone summary HTML ──────────────────────────────────────────────────────────
 def zone_html(df):
+    """
+    Zone ranking panel — driven by DBSCAN-discovered zones, not hardcoded names.
+    Falls back to groupby zone_name if zone_df not available.
+    """
+    zone_df = st.session_state.get("zone_df", pd.DataFrame())
+
+    if not zone_df.empty:
+        # Use DBSCAN zone_df directly — already has all metrics
+        rows = zone_df.sort_values("order_count", ascending=False).head(8)
+        mx   = rows["order_count"].max() or 1
+        out  = ""
+        for _, r in rows.iterrows():
+            p    = r["unmet_pct"]
+            cls  = "zp-bad" if p>=18 else "zp-med" if p>=10 else "zp-ok"
+            bw   = max(4, int(r["order_count"] / mx * 100))
+            out += (
+                f'<div class="zrow">'
+                f'<span style="font-size:12px;font-weight:500;min-width:52px">'
+                f'{r["zone_name"]}</span>'
+                f'<div style="flex:1;margin:0 8px;height:3px;'
+                f'background:{W["border_light"]};border-radius:2px">'
+                f'<div style="width:{bw}%;height:3px;background:#163300;border-radius:2px">'
+                f'</div></div>'
+                f'<span style="font-size:12px;font-weight:500;min-width:34px;text-align:right">'
+                f'{int(r["order_count"]):,}</span>'
+                f'<span class="zpill {cls}" style="margin-left:8px">{p}%</span>'
+                f'</div>'
+            )
+        return out
+
+    # Fallback: compute from filtered df if zone_df not in session
     if df.empty:
         return f"<p style='color:{W['content_tertiary']};font-size:13px'>No data.</p>"
     zc = df.groupby("zone_name").size().reset_index(name="orders")
     zu = (df[df["status"]=="no_driver"].groupby("zone_name").size()
           .reset_index(name="unmet"))
-    mg = zc.merge(zu,on="zone_name",how="left").fillna(0)
-    mg["unmet"]     = mg["unmet"].astype(int)
-    mg["unmet_pct"] = (mg["unmet"]/mg["orders"]*100).round(1)
-    mg = mg.sort_values("orders",ascending=False).head(8)
+    mg = zc.merge(zu, on="zone_name", how="left").fillna(0)
+    mg["unmet_pct"] = (mg["unmet"] / mg["orders"] * 100).round(1)
+    mg = mg.sort_values("orders", ascending=False).head(8)
     mx = mg["orders"].max() or 1
     out = ""
-    for _,r in mg.iterrows():
+    for _, r in mg.iterrows():
         p   = r["unmet_pct"]
         cls = "zp-bad" if p>=18 else "zp-med" if p>=10 else "zp-ok"
-        bw  = max(4,int(r["orders"]/mx*100))
-        sh  = str(r["zone_name"]).split("/")[0].strip()
-        out += (f'<div class="zrow">'
-                f'<span style="font-size:12px;max-width:110px;overflow:hidden;'
-                f'text-overflow:ellipsis;white-space:nowrap">{sh}</span>'
-                f'<div style="flex:1;margin:0 8px;height:3px;background:{W["border_light"]};border-radius:2px">'
-                f'<div style="width:{bw}%;height:3px;background:#163300;border-radius:2px"></div></div>'
-                f'<span style="font-size:12px;font-weight:500;min-width:28px;text-align:right">'
-                f'{int(r["orders"])}</span>'
-                f'<span class="zpill {cls}" style="margin-left:8px">{p}%</span>'
-                f'</div>')
+        bw  = max(4, int(r["orders"] / mx * 100))
+        out += (
+            f'<div class="zrow">'
+            f'<span style="font-size:12px;max-width:110px;overflow:hidden;'
+            f'text-overflow:ellipsis;white-space:nowrap">{r["zone_name"]}</span>'
+            f'<div style="flex:1;margin:0 8px;height:3px;background:{W["border_light"]};border-radius:2px">'
+            f'<div style="width:{bw}%;height:3px;background:#163300;border-radius:2px"></div></div>'
+            f'<span style="font-size:12px;font-weight:500;min-width:28px;text-align:right">'
+            f'{int(r["orders"])}</span>'
+            f'<span class="zpill {cls}" style="margin-left:8px">{p}%</span>'
+            f'</div>'
+        )
     return out
 
 # ── Upload screen ──────────────────────────────────────────────────────────────
@@ -1138,8 +1299,11 @@ def dashboard(df_raw, sh, sd, sv):
     unmet_p = round(unmet/total*100,1) if total else 0
     done    = len(df[df["status"]=="completed"]) if total else 0
     done_p  = round(done/total*100,1) if total else 0
-    peakz   = (df.groupby("zone_name").size().idxmax().split("/")[0].strip()
-               if total else "—")
+    zone_df_m = st.session_state.get("zone_df", pd.DataFrame())
+    peakz = (zone_df_m.iloc[0]["zone_name"]
+             if not zone_df_m.empty
+             else df.groupby("zone_name").size().idxmax()
+             if total else "—")
 
     stype, stxt = STORIES.get(sh, ("org","")) if sh>=0 else ("org","")
     vm = {"guar":("DEPLOY GUARANTEE","b-guar"),
@@ -1261,14 +1425,32 @@ def dashboard(df_raw, sh, sd, sv):
             unsafe_allow_html=True,
         )
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-        st.markdown(f"""
-        <div style="background:{W['green_light']};border-radius:10px;
-                    padding:12px 14px;font-size:12px;color:{W['green_forest']}">
-          <div style="font-weight:600;margin-bottom:4px">Tier 1 guarantee zones</div>
-          KLCC / Bukit Bintang &amp; KL Sentral<br>
-          <span style="opacity:0.75">Morning: 7:30–9:30 AM<br>Evening: 5:30–9:00 PM</span>
-        </div>
-        """, unsafe_allow_html=True)
+        # Dynamic top zones from DBSCAN
+        zone_df_s = st.session_state.get("zone_df", pd.DataFrame())
+        if not zone_df_s.empty:
+            top2  = zone_df_s.head(2)
+            names = " · ".join(top2["zone_name"].tolist())
+            avg_u = top2["unmet_pct"].mean()
+            u_cls = W["negative"] if avg_u>=18 else W["warning"] if avg_u>=10 else W["positive"]
+            st.markdown(
+                f'<div style="background:{W["green_light"]};border-radius:10px;'
+                f'padding:12px 14px;font-size:12px;color:{W["green_forest"]}">'
+                f'<div style="font-weight:600;margin-bottom:4px">Top 2 demand zones</div>'
+                f'{names}<br>'
+                f'<span style="opacity:0.75">Avg unmet: '
+                f'<b style="color:{u_cls}">{avg_u:.1f}%</b></span>'
+                f'<div style="margin-top:6px;opacity:0.75;font-size:11px">'
+                f'Zones derived from your order data via DBSCAN</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f'<div style="background:{W["bg_tertiary"]};border-radius:10px;'
+                f'padding:12px 14px;font-size:12px;color:{W["content_tertiary"]}">'
+                f'Upload a CSV to discover demand zones.</div>',
+                unsafe_allow_html=True,
+            )
 
         # H3 reading guide shown only in grid view
         if "H3" in view_toggle:
