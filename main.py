@@ -14,6 +14,7 @@ import folium
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
 import plotly.graph_objects as go
+import io
 import pydeck as pdk
 import h3
 from datetime import datetime
@@ -242,6 +243,30 @@ def sample_csv(n=300):
     return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
 
 # ── CSV parser / validator ─────────────────────────────────────────────────────
+
+H3_RES = 8   # ~0.86 km² per cell — matches the 2 km broadcast radius well
+
+def _h3_color(pct: float) -> list:
+    if pct >= 20:   return [208,   2,  27, 210]
+    elif pct >= 12: return [245, 166,  35, 200]
+    elif pct >= 5:  return [158, 232, 112, 190]
+    else:           return [ 22,  51,   0, 160]
+
+
+def add_h3_column(df: pd.DataFrame, res: int = H3_RES) -> pd.DataFrame:
+    """
+    Vectorised H3 cell assignment.
+    Called once when CSV is uploaded — result stored in session_state.df.
+    Never called again during filter interactions.
+    """
+    lats = df["order_lat"].to_numpy()
+    lngs = df["order_lng"].to_numpy()
+    df = df.copy()
+    df["h3_cell"] = [h3.latlng_to_cell(float(lat), float(lng), res)
+                     for lat, lng in zip(lats, lngs)]
+    return df
+
+
 def parse_csv(file):
     """Returns (df | None, [warnings], error_str | None)."""
     warns = []
@@ -371,7 +396,10 @@ def parse_csv(file):
         df["order_id"] = [f"ORD{i:06d}" for i in range(len(df))]
         warns.append("No `order_id` column — sequential IDs generated.")
 
-    return df.reset_index(drop=True), warns, None
+    # H3 cell assignment — done once here, never recomputed on filter changes
+    df = add_h3_column(df.reset_index(drop=True), H3_RES)
+
+    return df, warns, None
 
 # ── Upload handler ─────────────────────────────────────────────────────────────
 def handle_upload(f):
@@ -435,47 +463,18 @@ def build_map(df, view):
 
 
 # ── H3 hex grid ───────────────────────────────────────────────────────────────
-H3_RES = 8   # ~0.86 km² per cell — matches the 2 km broadcast radius well
-
-@st.cache_data(show_spinner=False)
-def build_h3(df_json: str, res: int) -> pd.DataFrame:
-    """Bin orders into H3 cells, compute per-cell metrics. df_json is hashable."""
-    df = pd.read_json(df_json, orient="records")
-    if df.empty:
-        return pd.DataFrame()
-    df["h3_cell"] = df.apply(
-        lambda r: h3.latlng_to_cell(r.order_lat, r.order_lng, res), axis=1
-    )
-    agg = df.groupby("h3_cell").agg(
-        total     =("status", "count"),
-        unmet     =("status", lambda x: (x=="no_driver").sum()),
-        cancelled =("status", lambda x: (x=="cancelled").sum()),
-    ).reset_index()
-    agg["unmet_pct"]      = (agg["unmet"]  / agg["total"] * 100).round(1)
-    agg["cancel_pct"]     = (agg["cancelled"] / agg["total"] * 100).round(1)
-
-    def _color(pct):
-        if pct >= 20:   return [208,   2,  27, 210]
-        elif pct >= 12: return [245, 166,  35, 200]
-        elif pct >= 5:  return [158, 232, 112, 190]
-        else:           return [ 22,  51,   0, 160]
-
-    agg["fill_color"] = agg["unmet_pct"].apply(_color)
-    max_t = agg["total"].max() or 1
-    agg["elevation"] = (agg["total"] / max_t * 300).round(0).astype(int)
-    agg["tooltip"]   = agg.apply(
-        lambda r: f"{int(r.total)} orders · {r.unmet_pct}% unmet · {int(r.unmet)} lost",
-        axis=1,
-    )
-    return agg
-
-
 def render_h3(df: pd.DataFrame, extruded: bool = False):
     """Render H3 hex grid via pydeck."""
     if df.empty:
         st.info("No data for this filter.")
         return
-    hexes = build_h3(df.to_json(orient="records"), H3_RES)
+    if "h3_cell" not in df.columns:
+        st.info("H3 cells not computed — re-upload your CSV.")
+        return
+
+    # Pass only the two columns needed — tiny payload for cache hash
+    slim = df[["h3_cell", "status"]].to_json(orient="records")
+    hexes = build_h3(slim, H3_RES)
     if hexes.empty:
         st.info("Not enough points to form hexagons.")
         return
