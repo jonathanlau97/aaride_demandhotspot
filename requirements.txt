@@ -6,3 +6,5 @@ streamlit-folium
 plotly
 h3
 pydeck
+scikit-learn
+scipy
