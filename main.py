@@ -29,23 +29,32 @@ st.set_page_config(
 
 # ── Wise Neptune design tokens ─────────────────────────────────────────────────
 W = {
-    "green_forest":      "#163300",
-    "green_bright":      "#9FE870",
-    "green_light":       "#ECFCE8",
-    "content_primary":   "#1A1A2E",
-    "content_secondary": "#4A4A6A",
-    "content_tertiary":  "#9E9EBF",
-    "bg_primary":        "#FFFFFF",
-    "bg_secondary":      "#F8F9FA",
-    "border_light":      "#E8EAF0",
-    "border_mid":        "#D0D4E0",
-    "positive":          "#2ECC5A",
-    "positive_bg":       "#ECFCE8",
-    "negative":          "#D0021B",
-    "negative_bg":       "#FFF0F0",
-    "warning":           "#F5A623",
-    "warning_bg":        "#FFF8EC",
-    "bg_tertiary":       "#F0F2F5",
+    # Core brand — exact Wise spec
+    "green_forest":      "#163300",   # Forest Green — Interactive Primary
+    "green_bright":      "#9FE870",   # Bright Green — Interactive Accent
+    "green_light":       "#F0FAE8",   # Background Neutral (Forest Green @ 8%)
+
+    # Content — real Wise content greys (green-tinted neutrals)
+    "content_primary":   "#0E0F0C",   # Content Primary
+    "content_secondary": "#454745",   # Content Secondary
+    "content_tertiary":  "#6A6C6A",   # Content Tertiary
+
+    # Backgrounds
+    "bg_primary":        "#FFFFFF",   # Background Screen
+    "bg_secondary":      "#F7F8F5",   # Neutral surface (Forest Green @ 4%)
+    "bg_tertiary":       "#EEEEE9",   # Slightly deeper neutral
+
+    # Borders — Forest Green @ 12%
+    "border_light":      "#E3E4DF",
+    "border_mid":        "#C8C9C3",
+
+    # Sentiment — exact Wise tokens
+    "positive":          "#2F5711",   # Sentiment Positive
+    "positive_bg":       "#EAF4E0",   # Positive light surface
+    "negative":          "#A8200D",   # Sentiment Negative
+    "negative_bg":       "#FAEAE8",   # Negative light surface
+    "warning":           "#EDC843",   # Sentiment Warning
+    "warning_bg":        "#FDF8E1",   # Warning light surface
 }
 
 # ── Global CSS ─────────────────────────────────────────────────────────────────
@@ -247,10 +256,15 @@ def sample_csv(n=300):
 H3_RES = 8   # ~0.86 km² per cell — matches the 2 km broadcast radius well
 
 def _h3_color(pct: float) -> list:
-    if pct >= 20:   return [208,   2,  27, 210]
-    elif pct >= 12: return [245, 166,  35, 200]
-    elif pct >= 5:  return [158, 232, 112, 190]
-    else:           return [ 22,  51,   0, 160]
+    """
+    Wise-aligned hex cell colours — light enough to read on a white map.
+    Sentiment Negative / Warning / Positive from real Wise tokens.
+    Alpha kept at 180 max so the map base stays visible underneath.
+    """
+    if pct >= 20:   return [168,  32,  13, 200]   # Sentiment Negative #A8200D — crisis
+    elif pct >= 12: return [237, 200,  67, 190]   # Sentiment Warning  #EDC843 — watch
+    elif pct >= 5:  return [159, 232, 112, 170]   # Bright Green       #9FE870 — OK
+    else:           return [234, 244, 224, 150]   # Positive light bg  #EAF4E0 — well served
 
 
 def add_h3_column(df: pd.DataFrame, res: int = H3_RES) -> pd.DataFrame:
@@ -521,7 +535,7 @@ def render_h3(df: pd.DataFrame, extruded: bool = False):
         pickable=True,
         auto_highlight=True,
         highlight_color=[255, 255, 255, 60],
-        coverage=0.92,
+        coverage=0.88,  # slight gap between cells aids readability on white
     )
     view = pdk.ViewState(
         latitude=3.1478, longitude=101.6953,
@@ -531,7 +545,7 @@ def render_h3(df: pd.DataFrame, extruded: bool = False):
         pdk.Deck(
             layers=[layer],
             initial_view_state=view,
-            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+            map_style="light",
             tooltip={
                 "html": "<b>{tooltip}</b>",
                 "style": {"backgroundColor":"#163300","color":"#9FE870",
@@ -551,10 +565,10 @@ def render_h3(df: pd.DataFrame, extruded: bool = False):
                  background:#D0021B;display:inline-block;margin-right:5px"></span>
           Crisis &gt;20% &nbsp;<b style="color:{W['negative']}">{crisis}</b> cells</span>
           <span><span style="width:12px;height:12px;border-radius:2px;
-                 background:#F5A623;display:inline-block;margin-right:5px"></span>
-          Watch 12–20% &nbsp;<b style="color:{W['warning']}">{watch}</b> cells</span>
+                 background:#EDC843;display:inline-block;margin-right:5px;border:1px solid #C8A800"></span>
+          Watch 12–20% &nbsp;<b style="color:#8A6E00">{watch}</b> cells</span>
           <span><span style="width:12px;height:12px;border-radius:2px;
-                 background:#9FE870;display:inline-block;margin-right:5px"></span>
+                 background:#9FE870;display:inline-block;margin-right:5px;border:1px solid #5AAA30"></span>
           OK &lt;12% &nbsp;<b style="color:{W['positive']}">{ok}</b> cells</span>
           <span style="margin-left:auto;color:{W['content_tertiary']}">
             H3 res {H3_RES} · ~0.86 km²/cell · {len(hexes)} cells</span>
