@@ -330,30 +330,47 @@ def lh(h):
 @st.cache_data
 def sample_csv(n=1500):
     """
-    1,500 rows so each H3 cell has enough orders for meaningful unmet rates.
-    Realistic KL distribution: ~10% no_driver overall, peaks at 18% evening.
+    Generate sample CSV using hardcoded KL hotspot coordinates.
+    No dependency on ZONES — coordinates are inline so this function
+    is self-contained and survives any refactoring of the zone system.
+    1,500 rows gives enough density for DBSCAN to find 4-6 natural zones.
     """
-    rng = np.random.default_rng(42)
-    w   = np.array([z["score"] for z in ZONES], dtype=float); w /= w.sum()
+    # Realistic KL demand hotspots — lat/lng/spread/weight
+    # These are ONLY used for sample data generation, not for zone labelling
+    KL_HOTSPOTS = [
+        (3.1579, 101.7123, 0.010, 9),  # KLCC / Bukit Bintang
+        (3.1340, 101.6862, 0.008, 8),  # KL Sentral
+        (3.1180, 101.6780, 0.009, 7),  # Bangsar
+        (3.1530, 101.6300, 0.010, 7),  # Damansara
+        (3.1720, 101.6990, 0.008, 6),  # Chow Kit
+        (3.0740, 101.6050, 0.009, 6),  # Sunway
+        (3.1730, 101.6530, 0.008, 5),  # Mont Kiara
+        (3.1080, 101.7450, 0.009, 5),  # Cheras
+    ]
+    rng     = np.random.default_rng(42)
+    weights = np.array([h[3] for h in KL_HOTSPOTS], dtype=float)
+    weights /= weights.sum()
     rows, attempts = [], 0
-    while len(rows) < n and attempts < n*10:
+    while len(rows) < n and attempts < n * 10:
         attempts += 1
-        z    = ZONES[rng.choice(len(ZONES), p=w)]
-        hour = int(rng.integers(0,24))
+        idx  = rng.choice(len(KL_HOTSPOTS), p=weights)
+        lat0, lng0, spread, _ = KL_HOTSPOTS[idx]
+        hour = int(rng.integers(0, 24))
         if rng.random() > HOUR_PROFILES[hour]: continue
-        day  = int(rng.integers(0,7))
-        if rng.random() > (1.0 if day<5 else 0.72): continue
-        # Realistic rates: no_driver peaks at 18% evening, 10% off-peak
-        up   = 0.18 if 17<=hour<=20 else 0.12 if 7<=hour<=9 else 0.07
-        r    = rng.random()
-        st_  = "no_driver" if r<up else "cancelled" if r<up+0.05 else "completed"
+        day  = int(rng.integers(0, 7))
+        if rng.random() > (1.0 if day < 5 else 0.72): continue
+        up  = 0.18 if 17<=hour<=20 else 0.12 if 7<=hour<=9 else 0.07
+        r   = rng.random()
+        st_ = "no_driver" if r<up else "cancelled" if r<up+0.05 else "completed"
         rows.append({
             "order_id":         f"ORD{len(rows):06d}",
-            "order_lat":        round(float(z["lat"]+rng.normal(0,z["r"]*0.55)),6),
-            "order_lng":        round(float(z["lng"]+rng.normal(0,z["r"]*0.55)),6),
-            "hour":             hour, "day": day, "status": st_,
-            "fare_amount":      round(float(rng.uniform(8,35)),2),
-            "trip_distance_km": round(float(rng.uniform(1,18)),1),
+            "order_lat":        round(float(lat0 + rng.normal(0, spread)), 6),
+            "order_lng":        round(float(lng0 + rng.normal(0, spread)), 6),
+            "hour":             hour,
+            "day":              day,
+            "status":           st_,
+            "fare_amount":      round(float(rng.uniform(8, 35)), 2),
+            "trip_distance_km": round(float(rng.uniform(1, 18)), 1),
         })
     return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
 
