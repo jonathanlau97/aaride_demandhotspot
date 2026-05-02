@@ -260,10 +260,10 @@ def _h3_color(pct: float) -> list:
     Wise-aligned hex cell colours at 15% opacity (alpha=38).
     Keeps map base fully visible — cells read as tints, not fills.
     """
-    if pct >= 20:   return [168,  32,  13, 38]   # Sentiment Negative #A8200D — crisis
-    elif pct >= 12: return [237, 200,  67, 38]   # Sentiment Warning  #EDC843 — watch
-    elif pct >= 5:  return [159, 232, 112, 38]   # Bright Green       #9FE870 — OK
-    else:           return [234, 244, 224, 38]   # Positive light bg  #EAF4E0 — well served
+    if pct >= 20:   return [168,  32,  13, 5]   # Sentiment Negative #A8200D — crisis
+    elif pct >= 12: return [237, 200,  67, 5]   # Sentiment Warning  #EDC843 — watch
+    elif pct >= 5:  return [159, 232, 112, 5]   # Bright Green       #9FE870 — OK
+    else:           return [234, 244, 224, 5]   # Positive light bg  #EAF4E0 — well served
 
 
 def add_h3_column(df: pd.DataFrame, res: int = H3_RES) -> pd.DataFrame:
