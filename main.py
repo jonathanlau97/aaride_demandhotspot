@@ -262,19 +262,13 @@ H3_RES = 8   # ~0.86 km² per cell — matches the 2 km broadcast radius well
 
 def _h3_color(pct: float) -> list:
     """
-    Ultra-light pastel tints — Wise sentiment colours blended at 15% with white.
-    Alpha=255 (WebGL/Streamlit ignores alpha so lightness is baked into RGB).
-
-    Formula: int(colour * 0.15 + 255 * 0.85)
-    Crisis  #A8200D @ 15% -> [242, 220, 218]  blush
-    Watch   #EDC843 @ 15% -> [253, 248, 226]  cream
-    OK      #9FE870 @ 15% -> [241, 253, 234]  pale mint
-    Good    #EAF4E0 @ 15% -> [252, 254, 251]  near-white
+    pydeck default sentiment colours — red / yellow / green.
+    Full opacity, saturated, readable on any map base.
     """
-    if pct >= 20:   return [242, 220, 218, 255]   # blush      — crisis
-    elif pct >= 12: return [253, 248, 226, 255]   # cream      — watch
-    elif pct >= 5:  return [241, 253, 234, 255]   # pale mint  — OK
-    else:           return [252, 254, 251, 255]   # near-white — well served
+    if pct >= 20:   return [255,  69,  58, 220]   # red    — crisis
+    elif pct >= 12: return [255, 196,   0, 200]   # yellow — watch
+    elif pct >= 5:  return [ 48, 209,  88, 180]   # green  — OK
+    else:           return [210, 240, 200, 140]   # pale green — well served
 
 
 def add_h3_column(df: pd.DataFrame, res: int = H3_RES) -> pd.DataFrame:
@@ -492,6 +486,88 @@ def build_map(df, view):
     return m
 
 
+
+@st.cache_data(show_spinner=False)
+def build_crisis_outlines(agg_json: str) -> dict:
+    """
+    Merge crisis/watch H3 cells into unified GeoJSON polygon outlines.
+    Returns dict with 'crisis' and 'watch' GeoJSON Feature dicts.
+    Input is the same tiny aggregated JSON already computed — no extra cost.
+    """
+    try:
+        agg = pd.read_json(io.StringIO(agg_json), orient="records")
+    except Exception:
+        return {}
+    if agg.empty:
+        return {}
+
+    crisis_cells = agg[agg["unmet_pct"] >= 20]["h3_cell"].tolist()
+    watch_cells  = agg[(agg["unmet_pct"] >= 12) & (agg["unmet_pct"] < 20)]["h3_cell"].tolist()
+
+    result = {}
+    if crisis_cells:
+        geo = h3.cells_to_geo(crisis_cells)
+        result["crisis"] = {"type": "Feature", "geometry": geo, "properties": {
+            "label": f"{len(crisis_cells)} crisis cells — >20% unmet demand"
+        }}
+    if watch_cells:
+        geo = h3.cells_to_geo(watch_cells)
+        result["watch"] = {"type": "Feature", "geometry": geo, "properties": {
+            "label": f"{len(watch_cells)} watch cells — 12–20% unmet demand"
+        }}
+    return result
+
+
+def add_outlines_to_map(m: folium.Map, outlines: dict, show: str) -> folium.Map:
+    """
+    Overlay crisis/watch outlines on a folium map.
+    show: 'Crisis' | 'Watch' | 'Both' | 'None'
+    """
+    if not outlines or show == "None":
+        return m
+
+    if show in ("Crisis", "Both") and "crisis" in outlines:
+        folium.GeoJson(
+            outlines["crisis"],
+            style_function=lambda f: {
+                "fillColor":   "#FF453A",
+                "fillOpacity": 0.10,
+                "color":       "#FF453A",
+                "weight":      2.5,
+                "dashArray":   "6 4",
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["label"],
+                aliases=[""],
+                style="font-family:Inter,sans-serif;font-size:12px;"
+                      "background:#163300;color:#9FE870;padding:6px 10px;"
+                      "border-radius:6px;border:none",
+            ),
+            name="Crisis zone",
+        ).add_to(m)
+
+    if show in ("Watch", "Both") and "watch" in outlines:
+        folium.GeoJson(
+            outlines["watch"],
+            style_function=lambda f: {
+                "fillColor":   "#FFC400",
+                "fillOpacity": 0.08,
+                "color":       "#FFC400",
+                "weight":      1.5,
+                "dashArray":   "4 4",
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["label"],
+                aliases=[""],
+                style="font-family:Inter,sans-serif;font-size:12px;"
+                      "background:#163300;color:#9FE870;padding:6px 10px;"
+                      "border-radius:6px;border:none",
+            ),
+            name="Watch zone",
+        ).add_to(m)
+
+    return m
+
 # ── H3 hex grid ───────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
@@ -526,13 +602,19 @@ def build_h3(agg_json: str) -> pd.DataFrame:
     return agg
 
 
-def render_h3(df: pd.DataFrame, cell_filter: str = "All"):
+def render_h3(
+    df: pd.DataFrame,
+    cell_filter: str = "All",
+    outlines: dict = None,
+    outline_show: str = "None",
+):
     """
     Render H3 hex grid via pydeck.
-    cell_filter: 'All' | 'Crisis only' | 'Watch only' | 'OK only'
-    Tooltip is attached to each hexagon's centroid via get_position,
-    making hover precise and not just an overlay.
+    cell_filter:  'All' | 'Crisis only' | 'Watch only' | 'OK only'
+    outlines:     dict from build_crisis_outlines() — merged GeoJSON polygons
+    outline_show: 'None' | 'Crisis' | 'Watch' | 'Both'
     """
+    outlines = outlines or {}
     if df.empty:
         st.info("No data for this filter.")
         return
@@ -617,6 +699,41 @@ def render_h3(df: pd.DataFrame, cell_filter: str = "All"):
         height=460,
     )
 
+    # ── Outline summary callout (shown below pydeck which can't do GeoJSON) ──
+    if outlines and outline_show != "None":
+        parts = []
+        if outline_show in ("Crisis","Both") and "crisis" in outlines:
+            n_crisis = (hexes["unmet_pct"] >= 20).sum()
+            parts.append(
+                f'<span style="display:inline-flex;align-items:center;gap:6px;'
+                f'background:#FF453A18;border:1px solid #FF453A55;border-radius:6px;'
+                f'padding:4px 10px;font-size:12px">'
+                f'<span style="width:16px;height:2px;background:#FF453A;border-radius:1px;'
+                f'border-top:1px dashed #FF453A"></span>'
+                f'<b style="color:#FF453A">Crisis outline</b> — {n_crisis} cells merged</span>'
+            )
+        if outline_show in ("Watch","Both") and "watch" in outlines:
+            n_watch = ((hexes["unmet_pct"]>=12)&(hexes["unmet_pct"]<20)).sum()
+            parts.append(
+                f'<span style="display:inline-flex;align-items:center;gap:6px;'
+                f'background:#FFC40018;border:1px solid #FFC40055;border-radius:6px;'
+                f'padding:4px 10px;font-size:12px">'
+                f'<span style="width:16px;height:2px;background:#FFC400;border-radius:1px;'
+                f'border-top:1px dashed #FFC400"></span>'
+                f'<b style="color:#996600">Watch outline</b> — {n_watch} cells merged</span>'
+            )
+        if parts:
+            st.markdown(
+                f'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;'
+                f'margin-bottom:4px">' + " ".join(parts) + '</div>',
+                unsafe_allow_html=True,
+            )
+            st.info(
+                "Zone outlines are shown on the Heatmap view. "
+                "Switch to Heatmap + outline to show your stakeholder the affected area as a single boundary.",
+                icon="ℹ️",
+            )
+
     # ── Cell summary stats ──
     total_cells  = len(hexes)
     crisis_cells = (hexes["unmet_pct"] >= 20).sum()
@@ -633,17 +750,17 @@ def render_h3(df: pd.DataFrame, cell_filter: str = "All"):
                     margin-top:8px;font-size:12px;color:{W['content_secondary']}">
           <span style="display:flex;align-items:center;gap:5px">
             <span style="width:12px;height:12px;border-radius:2px;
-                   background:#F2DCDA;border:1px solid #C8786E;display:inline-block"></span>
+                   background:#FF453A;display:inline-block"></span>
             Crisis &gt;20% &nbsp;<b style="color:{W['negative']}">{crisis_cells}</b>
           </span>
           <span style="display:flex;align-items:center;gap:5px">
             <span style="width:12px;height:12px;border-radius:2px;
-                   background:#FDF8E2;border:1px solid #C8A800;display:inline-block"></span>
+                   background:#FFC400;display:inline-block"></span>
             Watch 12–20% &nbsp;<b style="color:#8A6E00">{watch_cells}</b>
           </span>
           <span style="display:flex;align-items:center;gap:5px">
             <span style="width:12px;height:12px;border-radius:2px;
-                   background:#F1FDEA;border:1px solid #5AAA30;display:inline-block"></span>
+                   background:#30D158;display:inline-block"></span>
             OK &lt;12% &nbsp;<b style="color:{W['positive']}">{ok_cells}</b>
           </span>
           <span style="margin-left:auto;color:{W['content_tertiary']}">
@@ -1063,7 +1180,7 @@ def dashboard(df_raw, sh, sd, sv):
 
     # Map view toggle + zone panel
     # ── View toggle ──
-    col_tog, col_filt = st.columns([2, 2], gap="large")
+    col_tog, col_filt, col_outline = st.columns([2, 2, 2], gap="large")
     with col_tog:
         view_toggle = st.radio(
             "Map view",
@@ -1092,15 +1209,49 @@ def dashboard(df_raw, sh, sd, sv):
                 f'<b style="color:{W["positive"]}">OK</b> &lt;12%</div>',
                 unsafe_allow_html=True,
             )
+    with col_outline:
+        outline_show = st.radio(
+            "Zone outlines",
+            ["None", "Crisis", "Watch", "Both"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        st.markdown(
+            f'<div style="font-size:12px;color:{W["content_tertiary"]};margin:-4px 0 10px 0">'
+            f'<span style="display:inline-block;width:20px;height:2px;background:#FF453A;'
+            f'border-radius:1px;margin-right:4px;vertical-align:middle"></span>Crisis outline &nbsp;·&nbsp; '
+            f'<span style="display:inline-block;width:20px;height:2px;background:#FFC400;'
+            f'border-radius:1px;margin-right:4px;vertical-align:middle"></span>Watch outline</div>',
+            unsafe_allow_html=True,
+        )
 
     mc, pc = st.columns([3,1], gap="medium")
     with mc:
         sec_title = "H3 hex grid (res 8 · ~0.86 km²/cell)" if "H3" in view_toggle else "Live demand heatmap"
         st.markdown(f'<div class="sec">{sec_title}</div>', unsafe_allow_html=True)
+
+        # Pre-compute outlines from aggregated data (shared by both views)
+        outlines = {}
+        if outline_show != "None":
+            agg_for_outline = df.groupby("h3_cell").agg(
+                total    =("status","count"),
+                unmet    =("status", lambda x: (x=="no_driver").sum()),
+            ).reset_index()
+            agg_for_outline["unmet_pct"] = (
+                agg_for_outline["unmet"] / agg_for_outline["total"] * 100
+            ).round(1)
+            agg_outline_json = agg_for_outline[
+                ["h3_cell","total","unmet","unmet_pct"]
+            ].to_json(orient="records")
+            outlines = build_crisis_outlines(agg_outline_json)
+
         if view_toggle == "Heatmap":
-            st_folium(build_map(df, sv), width=None, height=460, returned_objects=[])
+            m = build_map(df, sv)
+            m = add_outlines_to_map(m, outlines, outline_show)
+            st_folium(m, width=None, height=460, returned_objects=[])
         else:
-            render_h3(df, cell_filter=h3_filter)
+            render_h3(df, cell_filter=h3_filter, outlines=outlines,
+                      outline_show=outline_show)
 
     with pc:
         st.markdown('<div class="sec">Zone ranking</div>', unsafe_allow_html=True)
