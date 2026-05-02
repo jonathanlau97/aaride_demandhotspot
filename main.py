@@ -44,6 +44,7 @@ W = {
     "negative_bg":       "#FFF0F0",
     "warning":           "#F5A623",
     "warning_bg":        "#FFF8EC",
+    "bg_tertiary":       "#F0F2F5",
 }
 
 # ── Global CSS ─────────────────────────────────────────────────────────────────
